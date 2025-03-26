@@ -1,1 +1,3 @@
 .env
+/reschat/chatbot/__pycache__/
+\reschat\reschat\__pycache__
