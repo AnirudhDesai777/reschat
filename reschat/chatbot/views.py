@@ -1,140 +1,224 @@
-# views.py
-
 from django.shortcuts import render
 from django.http import JsonResponse
 from django.conf import settings
 from django.views.decorators.csrf import ensure_csrf_cookie
 import json
-import re
-import os
+from openai import OpenAI
+from datetime import datetime
 
-# 1. Import the Groq client
-from groq import Groq
+# Initialize OpenAI client
+client = OpenAI(api_key=settings.OPENAI_API_KEY)
+model = "gpt-4o"
 
-from .rag_utils import FaissRAG
+# Pricing constants
+BASE_PRICE = 99.99
+EXTRA_LARGE_PRICE = 37.99
+LARGE_PRICE = 28.99
+BAGS_PRICE = 7.99
+FUEL_FEE = 12.39
+BOOKING_FEE = 18.00
 
-# 2. Initialize the FaissRAG helper
-faiss_rag = FaissRAG()
+def calculate_estimated_pickup_cost(items):
+    """Calculate the estimated pickup cost based on selected items."""
+    extra_large = items.get('extra_large', 0)
+    large = items.get('large', 0)
+    bags = items.get('bags', 0)
+    cost = (BASE_PRICE +
+            extra_large * EXTRA_LARGE_PRICE +
+            large * LARGE_PRICE +
+            bags * BAGS_PRICE +
+            FUEL_FEE)
+    return cost
 
-# 3. Initialize your Groq and define the model
-client = Groq(api_key=settings.GROQ_API_KEY)
-model = "llama-3.3-70b-versatile"
+def generate_confirmation_message(data):
+    """Generate a formatted confirmation message from reservation data."""
+    items = data.get('items', {})
+    address = data.get('address', '')
+    time_slot = data.get('time_slot', '')
+    
+    estimated_pickup_cost = calculate_estimated_pickup_cost(items)
+    total_cost = estimated_pickup_cost + BOOKING_FEE
+    
+    items_str = ", ".join([f"{key.replace('_', ' ').title()}: {value}" for key, value in items.items()])
+    message = (
+        f"🎉 Great choice! Here are your reservation details:\n\n"
+        f"📅 Pickup Date & Time: {time_slot}\n"
+        f"📍 Pickup Address: {address}\n"
+        f"📦 Items: {items_str}\n\n"
+        f"💰 Estimated Pickup Cost (Due On-Site): ${estimated_pickup_cost:.2f}\n"
+        f"💸 Booking Fee (Due Today): ${BOOKING_FEE:.2f}\n"
+        f"💵 Total Cost: ${total_cost:.2f}\n\n"
+        f"To secure this fantastic deal, simply type 'confirm' to finalize your reservation. "
+        f"Want to adjust? Type 'change items' or 'change schedule'!"
+    )
+    return message
 
 @ensure_csrf_cookie
 def chat_page(request):
-    """Render the chat page and ensure that a CSRF cookie is set"""
+    """Render the chat page and initialize session state."""
+    if 'state' not in request.session:
+        request.session['state'] = 'items'
+        request.session['reservation_data'] = {}
     return render(request, 'chatbot.html')
 
 def chat_api(request):
-    if request.method == 'POST':
-        try:
-            data = json.loads(request.body)
-            user_message = data.get('message', '')
+    """Handle chat API requests for the donation pickup reservation flow."""
+    if request.method != 'POST':
+        return JsonResponse({'error': 'Only POST method allowed'}, status=405)
 
-            # 1. Attempt to parse user's name
-            name_patterns = [
-                # "My name is First Last"
-                r"(?:my name is|i am|i'm)\s+([A-Za-z]+)\s+([A-Za-z]+)",
-                # "First name X, last name Y"
-                r"(?:first name|firstname)\s+([A-Za-z]+).*?(?:last name|lastname)\s+([A-Za-z]+)",
-                # "Last name Y, first name X"
-                r"(?:last name|lastname)\s+([A-Za-z]+).*?(?:first name|firstname)\s+([A-Za-z]+)"
-            ]
+    data = json.loads(request.body)
+    user_message = data.get('message', '').strip()
 
-            first_name = None
-            last_name = None
+    # Initialize session if not present
+    if 'state' not in request.session:
+        request.session['state'] = 'items'
+        request.session['reservation_data'] = {}
 
-            for pattern in name_patterns:
-                match = re.search(pattern, user_message, re.IGNORECASE)
-                if match:
-                    # For the last pattern, we need to swap first and last name
-                    if ("last name" in pattern and 
-                        "first name" in pattern and 
-                        "last name" in pattern.split("first name")[0]):
-                        last_name = match.group(1)
-                        first_name = match.group(2)
-                    else:
-                        first_name = match.group(1)
-                        last_name = match.group(2)
-                    break
+    state = request.session['state']
 
-            # 2. If we have a user name, do a direct retrieval
-            user_record = None
-            if first_name and last_name:
-                full_name = f"{first_name} {last_name}"
-                for rec in faiss_rag.records:
-                    if rec["name"].lower() == full_name.lower():
-                        user_record = rec
-                        break
-
-            # Direct name search in user message
-            if not user_record:
-                name_in_text = re.findall(r'\b([A-Za-z]+)\s+([A-Za-z]+)\b', user_message)
-                for first, last in name_in_text:
-                    full_name = f"{first} {last}"
-                    for rec in faiss_rag.records:
-                        if rec["name"].lower() == full_name.lower():
-                            user_record = rec
-                            break
-                    if user_record:
-                        break
-
-            # 3. Retrieve top-K similar user profiles
-            top_similar = faiss_rag.find_similar_users(user_message, top_k=3)
-
-            # 4. Construct retrieval-augmented context
-            context_snippets = []
-            if user_record:
-                context_snippets.append(
-                    f"EXACT USER MATCH FOUND: {user_record['name']}, User ID: {user_record['id']}, Orders: {', '.join(user_record['orders'])}."
-                )
-
-            for dist, rec in top_similar:
-                if rec:
-                    # Skip if this is the same as the exact match
-                    if user_record and rec['id'] == user_record['id']:
-                        continue
-                    snippet = f"Similar user: {rec['name']}, Orders: {', '.join(rec['orders'])}."
-                    context_snippets.append(snippet)
-
-            context_str = "\n".join(context_snippets)
-
-            # -------------------------
-            #  Enhanced final prompt:
-            # -------------------------
-            final_prompt = f"""
-You are a helpful support chatbot for a retail/ecommerce company, with access to user data.
-
-Your first steps whenever you speak to the user:
-1. Greet the user politely.
-2. Ask them for their name if you have not already gotten it.
-3. Check if that user is in our database.
-4. Mention that we can show their order history using a retrieval-augmented approach with FAISS.
-
-Context:
-{context_str}
-
-User says: "{user_message}"
-
-Important instructions:
-1. If an EXACT USER MATCH is found, prioritize that information over similar users.
-2. When a user explicitly asks to see their orders, show the orders from their exact match.
-3. Do not discuss "Similar user" data at all.
-4. When showing orders, format them in a clear, readable list.
-5. Be friendly, efficient, and direct in your response.
-"""
-
-            # 5. Send final_prompt to the LLaMA model (via Groq)
-            response = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "user", "content": final_prompt}],
+    # Handle initial message on page load
+    if user_message == "init":
+        if state == 'items':
+            response_text = (
+                "🌟 Welcome to ReSupply! Let’s get started with your donation pickup. "
+                "Tell me about the amazing items you’d like to donate—include types and quantities, "
+                "e.g., '2 large items, 3 bags of clothes' or '1 sofa and 2 large boxes.' "
+                "The more you donate, the bigger your impact! I’m here to make this process smooth and rewarding for you."
             )
-            response_text = response.choices[0].message.content
+        elif state == 'schedule':
+            response_text = (
+                "Awesome! You’re one step closer. Please share your pickup address and preferred date/time, "
+                "e.g., '87 Sheridan Street, Jamaica Plain, MA 02130, April 20, 2025 - 10 AM.' "
+                "We’ll find the perfect slot to suit your schedule—let’s make it happen!"
+            )
+        elif state == 'confirmation':
+            response_text = generate_confirmation_message(request.session['reservation_data'])
+        else:
+            response_text = (
+                "🎉 Your reservation is complete! Thank you for choosing ReSupply. "
+                "How else can I assist you today? Need more donation ideas or support?"
+            )
+        return JsonResponse({'response': response_text})
 
-            # 6. Return the model's text back to the frontend
-            return JsonResponse({'response': response_text})
+    # Process user message based on current state
+    if state == 'items':
+        prompt = (
+            "You are a helpful and sales-oriented assistant for ReSupply, a donation pickup service. "
+            "Extract the item types and quantities from the user's message: '{user_message}'. "
+            "Map items to categories: 'sofa', 'box', or 'boxes' as 'extra_large', 'large item' or 'large' as 'large', "
+            "'bag' or 'bags' as 'bags'. Respond with a JSON object where keys are 'extra_large', 'large', 'bags' "
+            "and values are integers representing quantities. If no valid items are mentioned or the input is unclear, "
+            "suggest they provide details like '2 large items, 3 bags of clothes' or '1 sofa and 2 large boxes' "
+            "to maximize their donation impact, and ask them to try again."
+        )
+        model_response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt.format(user_message=user_message)}]
+        )
+        extracted_text = model_response.choices[0].message.content
 
-        except Exception as e:
-            return JsonResponse({'error': str(e)}, status=500)
+        try:
+            items = json.loads(extracted_text)
+            if items and all(k in ['extra_large', 'large', 'bags'] and isinstance(v, int) for k, v in items.items()):
+                request.session['reservation_data']['items'] = items
+                request.session['state'] = 'schedule'
+                response_text = (
+                    "Fantastic selection! You’re making a difference. "
+                    "Now, please share your pickup address and preferred date/time, "
+                    "e.g., '87 Sheridan Street, Jamaica Plain, MA 02130, April 20, 2025 - 10 AM.' "
+                    "Let’s schedule this at your convenience!"
+                )
+            else:
+                response_text = (
+                    "I couldn’t quite identify your items. Please list them clearly, e.g., "
+                    "'2 large items, 3 bags of clothes' or '1 sofa and 2 large boxes,' "
+                    "so we can get you started on this rewarding journey! Try again."
+                )
+        except json.JSONDecodeError:
+            response_text = (
+                "Hmm, I couldn’t process that. Please list your items clearly, e.g., "
+                "'2 large items, 3 bags of clothes' or '1 sofa and 2 large boxes,' "
+                "to help us maximize your impact. Please try again."
+            )
 
-    return JsonResponse({'error': 'Only POST method allowed'}, status=405)
+    elif state == 'schedule':
+        prompt = (
+            "You are a helpful and sales-oriented assistant for ReSupply. "
+            "Extract the address and preferred date/time from the user's message: '{user_message}'. "
+            "Respond with a JSON object with keys 'address' and 'time_slot'. The time_slot should be "
+            "in a natural date/time format (e.g., 'April 20, 2025 - 10 AM'). If the input is invalid or incomplete, "
+            "encourage them to provide both address and date/time, e.g., '87 Sheridan Street, Jamaica Plain, MA 02130, April 20, 2025 - 10 AM,' "
+            "and highlight the convenience of flexible scheduling."
+        )
+        model_response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt.format(user_message=user_message)}]
+        )
+        extracted_text = model_response.choices[0].message.content
+
+        try:
+            data = json.loads(extracted_text)
+            address = data.get('address', '')
+            time_slot = data.get('time_slot', '')
+            if address and time_slot:
+                try:
+                    datetime.strptime(time_slot.split(' - ')[0], '%B %d, %Y')
+                    request.session['reservation_data']['address'] = address
+                    request.session['reservation_data']['time_slot'] = time_slot
+                    request.session['state'] = 'confirmation'
+                    response_text = generate_confirmation_message(request.session['reservation_data'])
+                except ValueError:
+                    response_text = (
+                        "Oops, that date doesn’t look right. Please provide your address and date/time, "
+                        "e.g., '87 Sheridan Street, Jamaica Plain, MA 02130, April 20, 2025 - 10 AM.' "
+                        "We’re flexible—pick a time that works for you!"
+                    )
+            else:
+                response_text = (
+                    "Almost there! Please include both your address and preferred date/time, "
+                    "e.g., '87 Sheridan Street, Jamaica Plain, MA 02130, April 20, 2025 - 10 AM.' "
+                    "Let’s find the perfect slot to make your donation seamless!"
+                )
+        except json.JSONDecodeError:
+            response_text = (
+                "I couldn’t parse that. Please provide your address and date/time clearly, "
+                "e.g., '87 Sheridan Street, Jamaica Plain, MA 02130, April 20, 2025 - 10 AM.' "
+                "We’re here to make this easy and convenient for you!"
+            )
+
+    elif state == 'confirmation':
+        message_lower = user_message.lower()
+        if "confirm" in message_lower:
+            response_text = (
+                "🎉 Excellent decision! Your reservation is confirmed with ReSupply. "
+                "Thank you for your generous donation—we’re thrilled to help you make an impact. "
+                "Need more assistance or another pickup? Let me know!"
+            )
+            request.session['state'] = 'done'
+        elif "change items" in message_lower:
+            request.session['state'] = 'items'
+            response_text = (
+                "Great choice to adjust! Please tell me the new items you’d like to donate, "
+                "e.g., '2 large items, 3 bags of clothes' or '1 sofa and 2 large boxes.' "
+                "Let’s maximize your contribution!"
+            )
+        elif "change schedule" in message_lower:
+            request.session['state'] = 'schedule'
+            response_text = (
+                "Let’s tweak that schedule! Please provide your new address and date/time, "
+                "e.g., '87 Sheridan Street, Jamaica Plain, MA 02130, April 20, 2025 - 10 AM.' "
+                "We’ll find the perfect fit!"
+            )
+        else:
+            response_text = (
+                "Please type 'confirm' to lock in this amazing deal, 'change items' to update your donation, "
+                "or 'change schedule' to adjust your pickup time. We’re excited to assist!"
+            )
+
+    else:  # state == 'done'
+        response_text = (
+            "🎉 Your reservation is complete! Thank you for choosing ReSupply. "
+            "Ready for another donation or need support? I’m here to help!"
+        )
+
+    return JsonResponse({'response': response_text})

@@ -26,6 +26,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-fwa25b9c928_2ba%a*c($wo&7+^193g(x#%sa$mw-wg*jj9e#y'
 GROQ_API_KEY=os.getenv("GROQ_API_KEY")
+OPENAI_API_KEY=os.getenv("OPENAI_API_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
