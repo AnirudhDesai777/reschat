@@ -23,6 +23,6 @@ def generate_mock_data(num_users=100):
 if __name__ == "__main__":
     data = generate_mock_data()
     os.makedirs("../data", exist_ok=True)
-    with open("../data/users.json", "w") as f:
+    with open("../data/users.json", "w+") as f:
         json.dump(data, f, indent=2)
     print("Mock data generated in data/users.json")

@@ -4,7 +4,7 @@ import faiss
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-JSON_PATH = "../data/users.json"
+JSON_PATH = "D:/Anirudh/Projects/ReSupply/reschat/data/users.json"
 FAISS_INDEX_PATH = "../data/faiss_index.bin"
 USER_DATA_PATH = "../data/user_data.pkl"
 
@@ -35,8 +35,7 @@ def build_faiss_index():
     # 5. Persist the index and the mapping
     faiss.write_index(index, FAISS_INDEX_PATH)
 
-    # We also need to store how to map from index → user record.
-    # We'll store the embeddings order’s record ID plus the entire user record if needed.
+
     user_mapping = {
         "ids": ids,      # the i-th embedding corresponds to user_records[i]
         "records": records

@@ -17,7 +17,7 @@ class FaissRAG:
         self.ids = data["ids"]
         self.records = data["records"]
 
-        # We’ll use same embedder as we used to build index:
+        
         self.model = SentenceTransformer('all-MiniLM-L6-v2')
 
     def find_similar_users(self, query_text, top_k=3):
